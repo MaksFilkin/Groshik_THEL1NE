@@ -1,0 +1,35 @@
+# /etc/systemd/system/groshik-agent.service
+# sudo useradd --system --home /opt/groshik-agent --shell /usr/sbin/nologin groshik-agent
+# sudo systemctl daemon-reload && sudo systemctl enable --now groshik-agent
+[Unit]
+Description=Groshik — THE LINE Protocol (the1ine) reference agent
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=groshik-agent
+Group=groshik-agent
+WorkingDirectory=/opt/groshik-agent
+EnvironmentFile=/opt/groshik-agent/agent.env
+Environment=PYTHONUNBUFFERED=1
+Environment=THE_LINE_KEYDIR=/var/lib/groshik-agent
+StateDirectory=groshik-agent
+StateDirectoryMode=0700
+ExecStart=/opt/groshik-agent/.venv/bin/python main.py
+Restart=on-failure
+RestartSec=5
+# hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/lib/groshik-agent
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

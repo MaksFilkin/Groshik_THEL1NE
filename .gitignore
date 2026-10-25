@@ -1,0 +1,18 @@
+# secrets / runtime state — never commit
+.env
+*.env
+!.env.example
+agent.env
+state/
+keys/
+.agent_wallet
+.agent_signing_priv
+registration.json
+*.tmp
+# python
+__pycache__/
+*.pyc
+.venv/
+venv/
+.pytest_cache/
+*.egg-info/
