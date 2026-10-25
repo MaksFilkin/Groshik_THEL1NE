@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.1.3 — 2026-10-25
+- **Grammar:** a short sentence is compressed on clause and phrase boundaries. The main clause
+  (subject, main verb, core object) stays; subordinate and trailing material is what gets dropped.
+  The summary no longer ends on a dangling word (`after a long`) or opens on a bare verb (`Get paid`),
+  and it is not only the subordinate clause (`Their result passes the checks.`).
+- **Coverage:** within `max_words`, several key sentences are kept so a dense paragraph (the waggle
+  dance: where the food is, how duration encodes distance, that bees fly to the source) does not
+  collapse to one secondary sentence.
+- **Status:** `python main.py status` reads `agent_name` from the protocol payload, and falls back
+  to `name` only when that field is absent.
+- **LLM:** recommended setup is an API key with `LLM_MODE=always` (extractive remains the no-key
+  default; number and copied-opening checks stay on). Claude and OpenAI models that reject
+  `temperature` (HTTP 400, including `unsupported_parameter` / `Unsupported value`) are retried once
+  without it, and that model then omits `temperature` for the rest of the process. A failed LLM call
+  logs a warning with the status code and a short error text, then uses the extractive summary.
+- Extractive `model_id` stays `groshik-extractive-v1`. The template text is `groshik-extractive-v4`.
+
 ## 0.1.2 — 2026-10-25
 - **Fix (pre-payout screen):** a single sentence that already fit `max_words` was returned verbatim,
   so the screen saw 100% overlap and a judge called it "input returned unchanged". The extractive

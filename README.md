@@ -9,15 +9,19 @@ provides the HTTP routes, HMAC check of trusted dispatch, Ed25519 result signing
 
 - Capability: `text_summary` — input `{text, max_words (10–1000, default 80)}` → output `{summary}` + `proof`
 - Price: **0.05 USDC** per task (bottom of the protocol's band 0.05–1.00)
-- Default engine: deterministic extractive summarizer (`groshik-extractive-v1`) — same input → same
-  output, only words from the input (never adds a figure or fact), whole sentences or whole clauses
-  only: no ellipsis, no mid-sentence cut, never the input unchanged, never just its opening words.
-  The highest-scoring sentence is kept; when it is longer than `max_words` it is compressed by
-  clauses rather than replaced by a shorter lesser sentence.
-- Optional LLM if `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` is set. With `LLM_MODE=hard` (default) it
-  handles only the inputs extraction handles badly — a single sentence, or anything needing
-  compression; `LLM_MODE=always` sends every input. LLM answers that are cut off, copy the input or its
-  opening, or contain numbers absent from the input are rejected and the extractive result is used.
+- Default engine (no API key): deterministic extractive summarizer (`groshik-extractive-v1`) — same
+  input → same output, only words from the input (never adds a figure or fact). It keeps several key
+  sentences when `max_words` allows, so the main facts survive, and compresses a long sentence by
+  whole clauses: the main clause stays (subject, verb, core object) and trailing phrases are dropped
+  whole. No ellipsis, no cut inside a phrase, no dangling last word, no bare-verb opening, never the
+  input unchanged.
+- Most reliable mode: set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` and `LLM_MODE=always`. The same
+  guards stay on — invented numbers, a copied opening, and a cut-off answer are rejected and the
+  extractive result is used. `LLM_MODE=hard` (the process default) sends the model only a single
+  sentence or anything the extractive engine had to compress. If a model returns HTTP 400 because
+  `temperature` is deprecated or unsupported, that request is retried once without the parameter and
+  later calls to the same model omit it. Any LLM failure is logged as a warning with the status code
+  and a short error (no keys), then extractive is used.
 - Routes: `GET /health`, `POST /the-line/ping`, `POST /the-line/quote`, `POST /the-line/dispatch-trusted`
 
 ---
@@ -39,11 +43,12 @@ cp .env.example agent.env && chmod 600 agent.env                       # впи�
 `/var/lib/groshik-agent`, права 600) и никогда не покидают сервер. Не коммитьте `agent.env` и этот каталог.
 
 Работающий агент: `agent_1792942902303_c37c32`, адрес <https://agent.the1ine.com>.
-Модель (если задан ключ) по умолчанию получает только «трудные» входы — одно предложение или текст,
-который нужно сжимать (`LLM_MODE=hard`; `always` — все входы). Без ключа выжимка собирается из целых
-предложений или целых частей предложения: без «…», без обрыва, никогда не возвращает вход дословно и
-никогда не только его начало. Если главное предложение длиннее `max_words`, оно сжимается по частям,
-а не заменяется более коротким второстепенным.
+Надёжнее всего задать ключ LLM и `LLM_MODE=always` (проверка чисел и дословного начала остаётся).
+Без ключа выжимка детерминированная: несколько ключевых предложений, если хватает `max_words`, и
+сжатие длинного предложения по целым частям — главная клауза сохраняется, хвост отбрасывается целиком.
+`LLM_MODE=hard` (значение по умолчанию в коде) отправляет в модель только одно предложение или текст,
+который пришлось сжимать. Если модель отвечает HTTP 400 из-за `temperature`, запрос повторяется один
+раз без этого параметра.
 
 ### Запуск
 ```bash
@@ -108,7 +113,7 @@ The running service picks the new state up without a restart. Re-running is a no
 | `HEARTBEAT_INTERVAL_S` | no | default `30` (`0` disables) |
 | `LOG_LEVEL` | no | default `INFO` |
 | `LLM_PROVIDER` | no | `auto` (default) / `openai` / `anthropic` / `none` |
-| `LLM_MODE` | no | `hard` (default: LLM only for single-sentence / compression cases) or `always` |
+| `LLM_MODE` | no | recommended `always` when a key is set; code default `hard` (LLM only for single-sentence / compression cases) |
 | `OPENAI_API_KEY`, `OPENAI_MODEL`, `OPENAI_BASE_URL` | no | optional OpenAI(-compatible) backend |
 | `ANTHROPIC_API_KEY`, `ANTHROPIC_MODEL` | no | optional Anthropic backend |
 | `LLM_TIMEOUT_S` | no | default `20`; on timeout/error → extractive |

@@ -155,7 +155,8 @@ async def cmd_status(cfg: Config) -> int:
     # The other extras used in this file (status, error, reason, …) are not reserved.
     safe = {k: info.get(k) for k in ("agent_id", "status", "endpoint_url", "capability_verified",
                                      "capability_verify_error", "reputation_score", "tempo_wallet_address")}
-    safe["agent_name"] = info.get("name")
+    # The protocol field is agent_name. Older payloads used name; either must show up.
+    safe["agent_name"] = info.get("agent_name") or info.get("name")
     log.info("status", extra=safe)
     return 0
 

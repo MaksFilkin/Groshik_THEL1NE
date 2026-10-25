@@ -132,6 +132,28 @@ def test_status_command_runs(monkeypatch, tmp_path, caplog):
     assert rec.name == "groshik"
 
 
+def test_status_prefers_agent_name_field(monkeypatch, tmp_path, caplog):
+    """The protocol field is agent_name. `name` is only the fallback."""
+    monkeypatch.setenv("THE_LINE_KEYDIR", str(tmp_path))
+    monkeypatch.setenv("THE_LINE_AGENT_ID", "agent-test")
+    monkeypatch.setenv("THE_LINE_TRUSTED_SECRET", SECRET)
+    for k in ("THE_LINE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AGENT_WALLET_PK",
+              "AGENT_SIGNING_PRIV"):
+        monkeypatch.delenv(k, raising=False)
+
+    async def fake_get(self, path, params=None):
+        return {"agent_id": "agent-test", "agent_name": "Groshik", "name": "legacy",
+                "status": "online"}
+
+    monkeypatch.setattr("the_line_sdk.TheLineClient._get", fake_get)
+    from main import cmd_status
+    caplog.set_level(logging.INFO, logger="groshik")
+    assert asyncio.run(cmd_status(Config())) == 0
+    rec = next(r for r in caplog.records if r.getMessage() == "status")
+    assert rec.agent_name == "Groshik"
+    assert rec.name == "groshik"
+
+
 def test_long_single_sentence_dispatch_has_no_ellipsis(client):
     task = {"text": "Providers on the network are paid in USDC only after the oracle checks their result, "
                     "which must carry a proof of execution, match the canonical output fields, and not "

@@ -73,8 +73,54 @@ def test_one_short_sentence_is_not_returned_unchanged():
     assert len(s.split()) <= len(SHORT_SENTENCE.split()) - max(2, len(SHORT_SENTENCE.split()) // 3)
     screen_safe(s, SHORT_SENTENCE, 80)
     low = s.lower()
-    assert "paid" in low and "pass" in low  # payment condition stays; no new facts
+    assert low.startswith("agents get paid")  # main clause, not a bare verb or the subordinate
+    assert "paid" in low and "pass" in low
+    assert not low.startswith("their result")
     assert extractive_details(SHORT_SENTENCE, 80)[0] == s
+
+
+COUNCIL = "The council approved the new budget on Tuesday after a long debate about city services."
+GRAMMAR_CASES = [
+    COUNCIL,
+    "The committee postponed the vote because of a sudden storm over the harbor.",
+    "Researchers published the study in the journal after months of review by outside experts.",
+    "The players left the field during the heavy rain before the final whistle.",
+]
+
+
+def _clause_edges_ok(summary: str) -> None:
+    words = summary.rstrip(".!?").split()
+    assert sm._starts_ok(words), summary
+    assert sm._ends_ok(words), summary
+    assert words[0].lower().strip(",;:") not in sm._VERBISH
+
+
+@pytest.mark.parametrize("text", GRAMMAR_CASES)
+def test_short_compression_keeps_the_main_clause(text):
+    """Drop trailing material. Never a dangling ending, a bare verb, or only the subordinate."""
+    s, _method = extractive_details(text, 80)
+    assert sm._norm(s) != sm._norm(text)
+    _clause_edges_ok(s)
+    low = s.lower()
+    assert "after a long." not in low and not low.rstrip(".").endswith(" long")
+    assert "sudden." not in low
+    # The matrix subject and verb survive; a subordinate-only cut does not.
+    head = text.split()[0].lower().strip(".,")
+    if head == "the" and len(text.split()) > 1:
+        head = text.split()[1].lower()
+    assert head in low
+    assert words_from_input(s, text)
+
+
+def test_bee_dance_keeps_the_main_facts():
+    """Dense short text: location signal, distance encoding, and the flight all survive."""
+    from the_line_sdk.cli import SMOKE_TEXT
+    s, _method = extractive_details(SMOKE_TEXT, 80)
+    screen_safe(s, SMOKE_TEXT, 80)
+    low = s.lower()
+    assert "danc" in low and "food" in low
+    assert "waggl" in low and "farther" in low
+    assert "fly" in low and "source" in low
 
 
 BOARD = (
@@ -175,6 +221,15 @@ def test_bad_llm_answers_fall_back_to_extractive(monkeypatch, bad):
     screen_safe(r.summary, LONG_SENTENCE, 60)
 
 
+def _http_response(status: int, body: str):
+    import httpx
+    return httpx.Response(
+        status,
+        content=body.encode(),
+        request=httpx.Request("POST", "https://example.invalid/llm"),
+    )
+
+
 def test_llm_over_length_is_trimmed_to_whole_sentences(monkeypatch):
     async def fake(cfg, text, max_words):
         return "Agents trade work for USDC on a testnet. " + "An oracle checks every proof before payment. " * 3
@@ -182,3 +237,83 @@ def test_llm_over_length_is_trimmed_to_whole_sentences(monkeypatch):
     monkeypatch.setattr(sm, "_openai", fake)
     r = asyncio.run(sm.summarize(_cfg(), LONG_SENTENCE, 12))
     assert len(r.summary.split()) <= 12 and r.summary.endswith(".") and "…" not in r.summary
+
+
+class _ScriptedClient:
+    """AsyncClient stand-in. `script` is a list of httpx.Response consumed in order."""
+
+    def __init__(self, script, calls, *args, **kwargs):
+        self._script = script
+        self._calls = calls
+
+    async def __aenter__(self):
+        return self
+
+    async def __aexit__(self, *exc):
+        return False
+
+    async def post(self, url, headers=None, json=None):
+        self._calls.append({"url": url, "json": dict(json or {}), "headers": dict(headers or {})})
+        if not self._script:
+            raise AssertionError("unexpected extra HTTP call")
+        return self._script.pop(0)
+
+
+def _scripted(monkeypatch, script, calls):
+    import httpx
+
+    def factory(*args, **kwargs):
+        return _ScriptedClient(script, calls, *args, **kwargs)
+
+    monkeypatch.setattr(httpx, "AsyncClient", factory)
+    monkeypatch.setattr(sm.httpx, "AsyncClient", factory)
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai"])
+def test_temperature_400_retries_once_and_is_remembered(monkeypatch, provider):
+    sm._omit_temperature.clear()
+    if provider == "anthropic":
+        cfg = _cfg(llm_provider="anthropic", anthropic_api_key="sk-ant-test", openai_api_key="",
+                   anthropic_model="claude-haiku-5-5")
+        rejected = '{"type":"error","error":{"message":"temperature is deprecated for this model"}}'
+        ok = '{"content":[{"type":"text","text":"Agents are paid after the result passes checks."}]}'
+    else:
+        cfg = _cfg(llm_provider="openai", openai_model="gpt-5-mini")
+        rejected = ('{"error":{"message":"Unsupported value: \'temperature\' does not support 0.2",'
+                    '"code":"unsupported_parameter","param":"temperature"}}')
+        ok = '{"choices":[{"message":{"content":"Agents are paid after the result passes checks."}}]}'
+    calls: list[dict] = []
+    script = [_http_response(400, rejected), _http_response(200, ok), _http_response(200, ok)]
+    _scripted(monkeypatch, script, calls)
+    first = asyncio.run(sm.summarize(cfg, SHORT_SENTENCE, 80))
+    assert first.model_id == (cfg.anthropic_model if provider == "anthropic" else cfg.openai_model)
+    assert "paid" in first.summary.lower()
+    assert "temperature" in calls[0]["json"]
+    assert "temperature" not in calls[1]["json"]
+    second = asyncio.run(sm.summarize(cfg, SHORT_SENTENCE, 80))
+    assert second.summary == first.summary
+    assert len(calls) == 3  # the remembered model skips the failing call
+    assert "temperature" not in calls[2]["json"]
+    sm._omit_temperature.clear()
+
+
+def test_llm_http_failure_logs_status_and_falls_back(monkeypatch, caplog):
+    sm._omit_temperature.clear()
+    cfg = _cfg(llm_provider="openai", openai_model="gpt-4o-mini")
+    calls: list[dict] = []
+    script = [_http_response(
+        400,
+        '{"error":{"message":"model not found","code":"model_not_found"}} key=sk-live-SECRETVALUE',
+    )]
+    _scripted(monkeypatch, script, calls)
+    caplog.set_level("WARNING", logger="groshik.summarizer")
+    result = asyncio.run(sm.summarize(cfg, SHORT_SENTENCE, 80))
+    assert len(calls) == 1  # not a temperature error, so no retry
+    assert "temperature" in calls[0]["json"]
+    assert result.model_id == sm.EXTRACTIVE_MODEL_ID
+    rec = next(r for r in caplog.records if "falling back to extractive" in r.getMessage())
+    assert rec.status_code == 400
+    assert "model not found" in rec.error
+    assert "sk-live-SECRETVALUE" not in rec.getMessage()
+    assert "sk-live-SECRETVALUE" not in rec.error
+    sm._omit_temperature.clear()
