@@ -1,9 +1,11 @@
 """Offline tests: no network, no registration, throwaway key dir."""
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
+import logging
 import time
 import uuid
 
@@ -96,6 +98,38 @@ def test_extractive_is_deterministic_bounded_and_adds_nothing():
     assert len(a.split()) <= 30
     src = set(TEXT.split())
     assert "…" not in a and all(w in src for w in a.split()[:-1])
+
+
+def test_status_command_runs(monkeypatch, tmp_path, caplog):
+    """`name` in the status payload must not collide with LogRecord.name."""
+    monkeypatch.setenv("THE_LINE_KEYDIR", str(tmp_path))
+    monkeypatch.setenv("THE_LINE_AGENT_ID", "agent-test")
+    monkeypatch.setenv("THE_LINE_TRUSTED_SECRET", SECRET)
+    for k in ("THE_LINE_API_KEY", "OPENAI_API_KEY", "ANTHROPIC_API_KEY", "AGENT_WALLET_PK",
+              "AGENT_SIGNING_PRIV"):
+        monkeypatch.delenv(k, raising=False)
+
+    async def fake_get(self, path, params=None):
+        assert path == "/agent/agent-test"
+        return {
+            "agent_id": "agent-test",
+            "name": "Groshik",
+            "status": "online",
+            "endpoint_url": "https://agent.the1ine.com",
+            "capability_verified": True,
+            "capability_verify_error": None,
+            "reputation_score": 0,
+            "tempo_wallet_address": "0xabc",
+        }
+
+    monkeypatch.setattr("the_line_sdk.TheLineClient._get", fake_get)
+    from main import cmd_status
+    cfg = Config()
+    caplog.set_level(logging.INFO, logger="groshik")
+    assert asyncio.run(cmd_status(cfg)) == 0
+    rec = next(r for r in caplog.records if r.getMessage() == "status")
+    assert rec.agent_name == "Groshik"
+    assert rec.name == "groshik"
 
 
 def test_long_single_sentence_dispatch_has_no_ellipsis(client):

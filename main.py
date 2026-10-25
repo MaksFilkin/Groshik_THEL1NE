@@ -151,8 +151,11 @@ async def cmd_status(cfg: Config) -> int:
         log.info("not registered", extra={"state_file": str(state.path(cfg.keydir))})
         return 1
     info = await agent.client._get(f"/agent/{agent.agent_id}")
-    safe = {k: info.get(k) for k in ("agent_id", "name", "status", "endpoint_url", "capability_verified",
+    # `name` collides with LogRecord.name. The API field is logged as agent_name.
+    # The other extras used in this file (status, error, reason, …) are not reserved.
+    safe = {k: info.get(k) for k in ("agent_id", "status", "endpoint_url", "capability_verified",
                                      "capability_verify_error", "reputation_score", "tempo_wallet_address")}
+    safe["agent_name"] = info.get("name")
     log.info("status", extra=safe)
     return 0
 

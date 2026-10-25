@@ -11,7 +11,9 @@ provides the HTTP routes, HMAC check of trusted dispatch, Ed25519 result signing
 - Price: **0.05 USDC** per task (bottom of the protocol's band 0.05–1.00)
 - Default engine: deterministic extractive summarizer (`groshik-extractive-v1`) — same input → same
   output, only words from the input (never adds a figure or fact), whole sentences or whole clauses
-  only: no ellipsis, no mid-sentence cut, never just the opening words of the input.
+  only: no ellipsis, no mid-sentence cut, never the input unchanged, never just its opening words.
+  The highest-scoring sentence is kept; when it is longer than `max_words` it is compressed by
+  clauses rather than replaced by a shorter lesser sentence.
 - Optional LLM if `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` is set. With `LLM_MODE=hard` (default) it
   handles only the inputs extraction handles badly — a single sentence, or anything needing
   compression; `LLM_MODE=always` sends every input. LLM answers that are cut off, copy the input or its
@@ -39,7 +41,9 @@ cp .env.example agent.env && chmod 600 agent.env                       # впи�
 Работающий агент: `agent_1792942902303_c37c32`, адрес <https://agent.the1ine.com>.
 Модель (если задан ключ) по умолчанию получает только «трудные» входы — одно предложение или текст,
 который нужно сжимать (`LLM_MODE=hard`; `always` — все входы). Без ключа выжимка собирается из целых
-предложений или целых частей предложения: без «…», без обрыва и никогда не только начало входа.
+предложений или целых частей предложения: без «…», без обрыва, никогда не возвращает вход дословно и
+никогда не только его начало. Если главное предложение длиннее `max_words`, оно сжимается по частям,
+а не заменяется более коротким второстепенным.
 
 ### Запуск
 ```bash

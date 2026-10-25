@@ -61,10 +61,51 @@ def test_one_long_sentence_is_compressed_to_whole_clauses(text, max_words):
     assert extractive_details(text, max_words)[0] == s  # deterministic
 
 
-def test_one_short_sentence_is_returned_whole():
+def test_one_short_sentence_is_not_returned_unchanged():
+    """A sentence that fits max_words must not be echoed: 100% overlap holds the payout."""
     s, method = extractive_details(SHORT_SENTENCE, 80)
-    assert s == SHORT_SENTENCE and method == "whole_sentence"
-    screen_safe(s, SHORT_SENTENCE, 80, allow_whole=True)
+    assert method in ("clauses", "window")
+    assert sm._norm(s) != sm._norm(SHORT_SENTENCE)
+    # Dropping only the first word is still the input with the subject cut off.
+    first_dropped = " ".join(SHORT_SENTENCE.rstrip(".").split()[1:])
+    assert sm._norm(s) != sm._norm(first_dropped)
+    # At least a third of the words (and two) must go, so this is not a one-word trim.
+    assert len(s.split()) <= len(SHORT_SENTENCE.split()) - max(2, len(SHORT_SENTENCE.split()) // 3)
+    screen_safe(s, SHORT_SENTENCE, 80)
+    low = s.lower()
+    assert "paid" in low and "pass" in low  # payment condition stays; no new facts
+    assert extractive_details(SHORT_SENTENCE, 80)[0] == s
+
+
+BOARD = (
+    "The board approved the acquisition of Northwind Robotics and authorized management to close "
+    "the deal this summer, subject to shareholder and regulatory approval. "
+    "Shares rose the next day."
+)
+
+
+def test_overlong_main_sentence_keeps_the_board_decision():
+    """The highest-scoring sentence is compressed, not replaced by a shorter aside."""
+    for text in (BOARD, "Shares rose the next day. " + BOARD.split(". ", 1)[0] + "."):
+        s, method = extractive_details(text, 12)
+        screen_safe(s, text, 12)
+        assert method in ("clauses", "window")
+        low = s.lower()
+        assert "board" in low
+        assert "acquisition" in low or "northwind" in low
+        assert "shares rose the next day" not in low
+
+
+def test_llm_rephrases_a_short_sentence(monkeypatch):
+    async def fake(cfg, text, max_words):
+        return "Payment follows only after the result passes the checks."
+
+    monkeypatch.setattr(sm, "_openai", fake)
+    cfg = _cfg()
+    r = asyncio.run(sm.summarize(cfg, SHORT_SENTENCE, 80))
+    assert r.model_id == cfg.openai_model
+    assert sm._norm(r.summary) != sm._norm(SHORT_SENTENCE)
+    assert "…" not in r.summary and r.summary.endswith(".")
 
 
 def test_long_sentence_without_punctuation():

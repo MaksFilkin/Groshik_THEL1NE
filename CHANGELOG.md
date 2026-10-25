@@ -1,5 +1,21 @@
 # Changelog
 
+## 0.1.2 — 2026-10-25
+- **Fix (pre-payout screen):** a single sentence that already fit `max_words` was returned verbatim,
+  so the screen saw 100% overlap and a judge called it "input returned unchanged". The extractive
+  engine now keeps the highest-scoring clause or interior span, short enough that the result is
+  not the input, its opening, or the input with only the first word removed. No new facts are
+  added. With an LLM configured, that input is rephrased by the model (`LLM_MODE=hard` already
+  routes single sentences there).
+- **Fix (incomplete summary):** when the highest-scoring sentence was longer than `max_words`, a
+  shorter lesser sentence was substituted (a market aside instead of the board's decision). That
+  sentence is now compressed by clauses.
+- **Fix:** `python main.py status` crashed with `KeyError: Attempt to overwrite 'name' in LogRecord`.
+  The API's `name` field is logged as `agent_name`. Other logging extras do not use reserved
+  LogRecord attribute names.
+- Extractive `model_id` stays `groshik-extractive-v1`. The template text is `groshik-extractive-v3`,
+  so `prompt_template_hash` tracks the new rules.
+
 ## 0.1.1 — 2026-10-25
 - **Fix (pre-payout screen):** a single long sentence was clipped with "…", which the screen held
   as "the beginning of the input verbatim + cut off". The extractive engine now never truncates:

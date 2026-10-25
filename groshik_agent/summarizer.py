@@ -10,6 +10,7 @@ import logging
 import math
 import re
 from dataclasses import dataclass
+from itertools import combinations
 from typing import Optional
 
 import httpx
@@ -19,22 +20,23 @@ from .config import Config
 log = logging.getLogger("groshik.summarizer")
 
 # Kept equal to the model_id in the registered model card; the algorithm revision is
-# visible in prompt_template_hash (the template text below changed in 0.1.1).
+# visible in prompt_template_hash (the template text below changed in 0.1.2).
 EXTRACTIVE_MODEL_ID = "groshik-extractive-v1"
 
 # The template is part of the proof (sha256), so any change to it shows up as a new hash.
 EXTRACTIVE_TEMPLATE = (
-    "groshik-extractive-v2: split into sentences; score each by the frequency of its content "
-    "words; keep the top 1-3 whole sentences in original order within max_words; a sentence "
-    "longer than max_words is reduced to its most important complete clauses; never an "
-    "ellipsis, never only the opening words of the input."
+    "groshik-extractive-v3: split into sentences; score each by the frequency of its content "
+    "words; keep the highest-scoring sentence, and when it is longer than max_words reduce it "
+    "to its most important complete clauses instead of a shorter lesser sentence; a single "
+    "sentence that fits is reduced the same way so the input is never returned unchanged; "
+    "never an ellipsis, never only the opening words of the input."
 )
 LLM_TEMPLATE = (
     "You summarize text for THE LINE Protocol. Write 1-3 concise sentences, at most "
     "{max_words} words, preserving the key information. Use only facts present in the "
     "text: add no numbers, dates, names or claims that the text does not contain. "
-    "Rephrase in your own words rather than copying the opening of the text, and end "
-    "with a complete sentence. Reply with the summary only."
+    "Rephrase in your own words rather than copying the text or its opening, and never "
+    "return the input unchanged. End with a complete sentence. Reply with the summary only."
 )
 
 _STOP = set(
@@ -191,6 +193,46 @@ def _compress_sentence(sentence: str, limit: int, score, text: str) -> tuple[str
     return out, "clauses"
 
 
+def _echoes(summary: str, text: str) -> bool:
+    """True when the summary is empty, the whole input, or only its opening words."""
+    if not summary or not summary.strip():
+        return True
+    return _norm(summary) == _norm(text) or is_verbatim_prefix(summary, text)
+
+
+def _reduce_fitting(sentence: str, max_words: int, score, text: str) -> tuple[str, str]:
+    """A sentence that already fits must still not be returned unchanged.
+
+    Drop at least a third of the words (and at least two). Among complete clause
+    subsets and the best interior window, keep the highest-scoring span that is
+    not the input and not its opening.
+    """
+    wc = len(sentence.split())
+    limit = min(max_words, wc - 1, max(5, wc - max(2, wc // 3)))
+    best: tuple[tuple[float, int, int], str, str] | None = None
+
+    def consider(out: str, how: str, clause_bonus: int) -> None:
+        nonlocal best
+        if _echoes(out, text) or len(out.split()) > max(limit, 1):
+            return
+        key = (score(out), len(out.split()), clause_bonus)
+        if best is None or key > best[0]:
+            best = (key, out, how)
+
+    clauses = _clauses(sentence)
+    lengths = [len(c.split()) for c in clauses]
+    if len(clauses) >= 2 and min(lengths) <= limit:
+        for size in range(1, len(clauses)):
+            for combo in combinations(range(len(clauses)), size):
+                if sum(lengths[i] for i in combo) > limit:
+                    continue
+                consider(_finish(", ".join(clauses[i] for i in combo)), "clauses", 1)
+    consider(_window(sentence, limit, score), "window", 0)
+    if best:
+        return best[1], best[2]
+    return _compress_sentence(sentence, max(1, limit), score, text)
+
+
 def extractive_details(text: str, max_words: int) -> tuple[str, str]:
     """Return (summary, method). method: sentences | whole_sentence | clauses | window."""
     sentences = _split_sentences(text)
@@ -199,9 +241,12 @@ def extractive_details(text: str, max_words: int) -> tuple[str, str]:
     score = _scorer(text)
     if len(sentences) == 1:
         s = sentences[0]
-        if len(s.split()) <= max_words:
-            return _finish(s) if s[-1] not in ".!?" else s, "whole_sentence"
-        return _compress_sentence(s, max_words, score, text)
+        wc = len(s.split())
+        if wc <= 1:  # nothing to drop without inventing words or returning empty
+            return (s if s[-1:] in ".!?" else _finish(s)), "whole_sentence"
+        if wc > max_words:
+            return _compress_sentence(s, max_words, score, text)
+        return _reduce_fitting(s, max_words, score, text)
 
     total = len(text.split())
     n = [len(s.split()) for s in sentences]
@@ -215,18 +260,20 @@ def extractive_details(text: str, max_words: int) -> tuple[str, str]:
             seen.add(k)
             uniq.append(i)
     ranked = uniq
-    budget = min(max_words, max(8, math.ceil(total * 0.6)))
-    chosen: list[int] = []
-    used = 0
+    # The highest-scoring sentence is the main point. Compress it by clauses when it
+    # does not fit — never substitute a shorter, less important sentence.
+    main = ranked[0]
+    if n[main] > max_words:
+        return _compress_sentence(sentences[main], max_words, score, text)
+    budget = min(max_words, max(n[main], max(8, math.ceil(total * 0.6))))
+    chosen: list[int] = [main]
+    used = n[main]
     for i in ranked:
+        if i == main:
+            continue
         if len(chosen) < 3 and used + n[i] <= budget:
             chosen.append(i)
             used += n[i]
-    if not chosen:
-        top = sentences[ranked[0]]
-        if n[ranked[0]] <= max_words and ranked[0] != 0:
-            return top, "sentences"
-        return _compress_sentence(top, max_words, score, text)
     chosen.sort()
     if chosen == list(range(len(chosen))):  # would be the opening of the input verbatim
         cap = min(max_words, math.floor(total * 0.85))
