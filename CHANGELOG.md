@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.1.4 — 2026-11-11
+- **Fix (truncated summaries):** Anthropic replies were sold cut off mid-word (`Anal.`, `82 samp.`).
+  `claude-haiku-5-5` turns thinking on by default, and that spend counts toward `max_tokens`, which
+  was 400. `_anthropic` now disables thinking, starts at `max_tokens` 4000, logs `stop_reason`, and
+  on `stop_reason=max_tokens` retries once at 16000. A second cut-off raises `TruncationError`.
+  `summarize` does not catch it, so the task fails and the buyer is refunded instead of receiving
+  the fragment or a silent extractive substitute.
+- **LLM guard:** `_llm_ok` no longer appends a period, so a cut-off fragment is not disguised as a
+  finished sentence.
+- **Anthropic request:** `temperature` is omitted. Haiku 5.5 returns HTTP 400 for any temperature
+  other than 1. The OpenAI path still sends `temperature` 0.2 and still retries once if that model
+  rejects the parameter.
+
 ## 0.1.3 — 2026-10-25
 - **Grammar:** a short sentence is compressed on clause and phrase boundaries. The main clause
   (subject, main verb, core object) stays; subordinate and trailing material is what gets dropped.

@@ -16,12 +16,16 @@ provides the HTTP routes, HMAC check of trusted dispatch, Ed25519 result signing
   whole. No ellipsis, no cut inside a phrase, no dangling last word, no bare-verb opening, never the
   input unchanged.
 - Most reliable mode: set `OPENAI_API_KEY` or `ANTHROPIC_API_KEY` and `LLM_MODE=always`. The same
-  guards stay on — invented numbers, a copied opening, and a cut-off answer are rejected and the
-  extractive result is used. `LLM_MODE=hard` (the process default) sends the model only a single
-  sentence or anything the extractive engine had to compress. If a model returns HTTP 400 because
-  `temperature` is deprecated or unsupported, that request is retried once without the parameter and
-  later calls to the same model omit it. Any LLM failure is logged as a warning with the status code
-  and a short error (no keys), then extractive is used.
+  guards stay on — invented numbers and a copied opening are rejected and the extractive result is
+  used. `LLM_MODE=hard` (the process default) sends the model only a single sentence or anything the
+  extractive engine had to compress. Anthropic requests omit `temperature` (Haiku 5.5 returns HTTP 400
+  for any value other than 1) and send `thinking: {"type": "disabled"}`, because thinking is on by
+  default and shares the output budget. The call uses `max_tokens` 4000, logs `stop_reason`, and
+  retries once at 16000 when `stop_reason` is `max_tokens`. A second cut-off fails the task (the buyer
+  is refunded) instead of selling the fragment. OpenAI still sends `temperature` 0.2; a model that
+  returns HTTP 400 because `temperature` is unsupported is retried once without it, and later calls
+  to that model omit it. Other LLM failures are logged as a warning with the status code and a short
+  error (no keys), then extractive is used.
 - Routes: `GET /health`, `POST /the-line/ping`, `POST /the-line/quote`, `POST /the-line/dispatch-trusted`
 
 ---
@@ -47,8 +51,12 @@ cp .env.example agent.env && chmod 600 agent.env                       # впи�
 Без ключа выжимка детерминированная: несколько ключевых предложений, если хватает `max_words`, и
 сжатие длинного предложения по целым частям — главная клауза сохраняется, хвост отбрасывается целиком.
 `LLM_MODE=hard` (значение по умолчанию в коде) отправляет в модель только одно предложение или текст,
-который пришлось сжимать. Если модель отвечает HTTP 400 из-за `temperature`, запрос повторяется один
-раз без этого параметра.
+который пришлось сжимать. Запрос к Anthropic не передаёт `temperature` (Haiku 5.5 отвечает 400 на
+любое значение кроме 1) и отключает thinking (`thinking: {"type": "disabled"}`), потому что thinking
+по умолчанию включён и ест тот же `max_tokens`. Лимит 4000, при `stop_reason=max_tokens` один повтор
+на 16000; если обрыв повторяется, задача падает и покупатель получает рефанд, а не обрезанную сводку.
+OpenAI по-прежнему шлёт `temperature` 0.2; HTTP 400 из-за `temperature` повторяется один раз без
+этого параметра. Остальные сбои LLM пишутся в лог и заменяются выжимкой.
 
 ### Запуск
 ```bash
