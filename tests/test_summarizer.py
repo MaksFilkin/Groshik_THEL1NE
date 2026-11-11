@@ -269,24 +269,18 @@ def _scripted(monkeypatch, script, calls):
     monkeypatch.setattr(sm.httpx, "AsyncClient", factory)
 
 
-@pytest.mark.parametrize("provider", ["anthropic", "openai"])
-def test_temperature_400_retries_once_and_is_remembered(monkeypatch, provider):
+def test_openai_temperature_400_retries_once_and_is_remembered(monkeypatch):
+    """OpenAI still sends temperature 0.2. Anthropic omits it; see the truncation tests."""
     sm._omit_temperature.clear()
-    if provider == "anthropic":
-        cfg = _cfg(llm_provider="anthropic", anthropic_api_key="sk-ant-test", openai_api_key="",
-                   anthropic_model="claude-haiku-5-5")
-        rejected = '{"type":"error","error":{"message":"temperature is deprecated for this model"}}'
-        ok = '{"content":[{"type":"text","text":"Agents are paid after the result passes checks."}]}'
-    else:
-        cfg = _cfg(llm_provider="openai", openai_model="gpt-5-mini")
-        rejected = ('{"error":{"message":"Unsupported value: \'temperature\' does not support 0.2",'
-                    '"code":"unsupported_parameter","param":"temperature"}}')
-        ok = '{"choices":[{"message":{"content":"Agents are paid after the result passes checks."}}]}'
+    cfg = _cfg(llm_provider="openai", openai_model="gpt-5-mini")
+    rejected = ('{"error":{"message":"Unsupported value: \'temperature\' does not support 0.2",'
+                '"code":"unsupported_parameter","param":"temperature"}}')
+    ok = '{"choices":[{"message":{"content":"Agents are paid after the result passes checks."}}]}'
     calls: list[dict] = []
     script = [_http_response(400, rejected), _http_response(200, ok), _http_response(200, ok)]
     _scripted(monkeypatch, script, calls)
     first = asyncio.run(sm.summarize(cfg, SHORT_SENTENCE, 80))
-    assert first.model_id == (cfg.anthropic_model if provider == "anthropic" else cfg.openai_model)
+    assert first.model_id == cfg.openai_model
     assert "paid" in first.summary.lower()
     assert "temperature" in calls[0]["json"]
     assert "temperature" not in calls[1]["json"]
@@ -294,6 +288,88 @@ def test_temperature_400_retries_once_and_is_remembered(monkeypatch, provider):
     assert second.summary == first.summary
     assert len(calls) == 3  # the remembered model skips the failing call
     assert "temperature" not in calls[2]["json"]
+    sm._omit_temperature.clear()
+
+
+def _anthropic_cfg() -> Config:
+    return _cfg(
+        llm_provider="anthropic",
+        anthropic_api_key="sk-ant-test",
+        openai_api_key="",
+        anthropic_model="claude-haiku-5-5",
+    )
+
+
+def _anthropic_body(stop: str, text: str, prefix: str = "") -> str:
+    return (
+        '{"stop_reason":"' + stop + '","content":[' + prefix
+        + '{"type":"text","text":"' + text + '"}]}'
+    )
+
+
+def test_llm_ok_does_not_append_a_period_to_a_fragment():
+    out, why = sm._llm_ok("Anal", LONG_SENTENCE, 80)
+    assert why == ""
+    assert out == "Anal"
+
+
+def test_anthropic_omits_temperature_disables_thinking_and_logs_stop_reason(monkeypatch, caplog):
+    sm._omit_temperature.clear()
+    cfg = _anthropic_cfg()
+    calls: list[dict] = []
+    _scripted(monkeypatch, [
+        _http_response(200, _anthropic_body("end_turn", "Agents are paid after the result passes checks.")),
+    ], calls)
+    caplog.set_level("INFO", logger="groshik.summarizer")
+    result = asyncio.run(sm.summarize(cfg, SHORT_SENTENCE, 80))
+    assert len(calls) == 1
+    payload = calls[0]["json"]
+    assert "temperature" not in payload
+    assert payload["max_tokens"] == 4000
+    assert payload["thinking"] == {"type": "disabled"}
+    assert payload["model"] == "claude-haiku-5-5"
+    assert result.model_id == cfg.anthropic_model
+    assert result.summary == "Agents are paid after the result passes checks."
+    rec = next(r for r in caplog.records if "stop_reason" in r.getMessage())
+    assert rec.stop_reason == "end_turn"
+    assert rec.max_tokens == 4000
+    sm._omit_temperature.clear()
+
+
+def test_anthropic_max_tokens_retries_once_at_16000(monkeypatch, caplog):
+    sm._omit_temperature.clear()
+    cfg = _anthropic_cfg()
+    calls: list[dict] = []
+    thinking = '{"type":"thinking","thinking":"secret","text":"SHOULD_NOT_APPEAR"},'
+    _scripted(monkeypatch, [
+        _http_response(200, _anthropic_body("max_tokens", "Anal", thinking)),
+        _http_response(200, _anthropic_body(
+            "end_turn", "Agents are paid after the result passes checks.",
+        )),
+    ], calls)
+    caplog.set_level("INFO", logger="groshik.summarizer")
+    result = asyncio.run(sm.summarize(cfg, SHORT_SENTENCE, 80))
+    assert [c["json"]["max_tokens"] for c in calls] == [4000, 16000]
+    assert all("temperature" not in c["json"] for c in calls)
+    assert all(c["json"]["thinking"] == {"type": "disabled"} for c in calls)
+    assert result.model_id == cfg.anthropic_model
+    assert result.summary == "Agents are paid after the result passes checks."
+    assert "SHOULD_NOT_APPEAR" not in result.summary
+    stops = [r.stop_reason for r in caplog.records if getattr(r, "stop_reason", None)]
+    assert stops == ["max_tokens", "end_turn"]
+    sm._omit_temperature.clear()
+
+
+def test_anthropic_truncation_after_retry_fails_the_task(monkeypatch):
+    """TruncationError must not be swallowed by the extractive fallback."""
+    sm._omit_temperature.clear()
+    cfg = _anthropic_cfg()
+    calls: list[dict] = []
+    cut = _http_response(200, _anthropic_body("max_tokens", "82 samp"))
+    _scripted(monkeypatch, [cut, _http_response(200, _anthropic_body("max_tokens", "82 samp"))], calls)
+    with pytest.raises(sm.TruncationError, match=r"max_tokens=16000"):
+        asyncio.run(sm.summarize(cfg, SHORT_SENTENCE, 80))
+    assert [c["json"]["max_tokens"] for c in calls] == [4000, 16000]
     sm._omit_temperature.clear()
 
 

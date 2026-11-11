@@ -62,6 +62,10 @@ class InputError(ValueError):
     pass
 
 
+class TruncationError(RuntimeError):
+    """LLM hit max_tokens (possibly after a retry). Fail the task; do not sell a cut-off summary."""
+
+
 def parse_input(task_input: dict) -> tuple[str, int]:
     data = task_input
     if "text" not in data and isinstance(data.get("input_data"), dict):
@@ -864,8 +868,7 @@ def _llm_ok(out: str, text: str, max_words: int) -> tuple[str, str]:
             return "", "too long"
         out = " ".join(kept)
     out = out.rstrip("…").rstrip()
-    if out and out[-1] not in ".!?":
-        out += "."
+    # Do not append a period: a max_tokens cut-off ("Anal") must not look finished ("Anal.").
     if not set(_NUM.findall(out)) <= set(_NUM.findall(text)):
         return "", "added a number not in the input"
     if _norm(out) == _norm(text) or is_verbatim_prefix(out, text):
@@ -893,21 +896,52 @@ async def _openai(cfg: Config, text: str, max_words: int) -> str:
 
 
 async def _anthropic(cfg: Config, text: str, max_words: int) -> str:
+    """Call Anthropic Messages. Log stop_reason; never return a max_tokens cut-off.
+
+    Haiku 5.5 turns adaptive thinking on by default and counts thinking toward max_tokens.
+    A 400-token cap often ends the reply mid-word. We start at 4000, retry once at 4x on
+    stop_reason=max_tokens, then raise TruncationError so the task fails (buyer refunded)
+    instead of selling a truncated summary.
+    """
+    url = "https://api.anthropic.com/v1/messages"
+    headers = {"x-api-key": cfg.anthropic_api_key, "anthropic-version": "2023-06-01"}
+    model_key = f"anthropic:{cfg.anthropic_model}"
+    base_limit = 4000
+
     async with httpx.AsyncClient(timeout=cfg.llm_timeout_s) as http:
-        r = await _chat_post(
-            http,
-            "https://api.anthropic.com/v1/messages",
-            {"x-api-key": cfg.anthropic_api_key, "anthropic-version": "2023-06-01"},
-            {
+        async def _once(max_tokens: int) -> tuple[str, str]:
+            # No temperature: Haiku 5.5 returns 400 for any value except 1; omitting avoids a
+            # wasted first call that _chat_post would otherwise retry without it.
+            payload = {
                 "model": cfg.anthropic_model,
-                "max_tokens": 400,
-                "temperature": 0.2,
+                "max_tokens": max_tokens,
                 "system": LLM_TEMPLATE.format(max_words=max_words),
                 "messages": [{"role": "user", "content": text}],
-            },
-            f"anthropic:{cfg.anthropic_model}",
-        )
-        return "".join(b.get("text", "") for b in r.json().get("content", [])).strip()
+                # Haiku 5.5: thinking on by default, shares max_tokens. Summaries do not need it.
+                # Docs allow thinking:disabled at effort high or below (default medium).
+                "thinking": {"type": "disabled"},
+            }
+            r = await _chat_post(http, url, headers, payload, model_key)
+            body = r.json()
+            stop = body.get("stop_reason") or ""
+            log.info(
+                "anthropic stop_reason=%s max_tokens=%s",
+                stop, max_tokens,
+                extra={"stop_reason": stop, "max_tokens": max_tokens, "model": cfg.anthropic_model},
+            )
+            out = "".join(
+                b.get("text", "") for b in body.get("content", []) if b.get("type") == "text"
+            ).strip()
+            return out, stop
+
+        out, stop = await _once(base_limit)
+        if stop == "max_tokens":
+            out, stop = await _once(base_limit * 4)
+            if stop == "max_tokens":
+                raise TruncationError(
+                    f"anthropic stop_reason=max_tokens after retry (max_tokens={base_limit * 4})"
+                )
+        return out
 
 
 def llm_backend(cfg: Config) -> Optional[str]:
@@ -939,6 +973,8 @@ async def summarize(cfg: Config, text: str, max_words: int) -> Summary:
         if out:
             return Summary(out, model, LLM_TEMPLATE)
         log.warning("llm answer rejected, using extractive", extra={"backend": backend, "reason": why})
+    except TruncationError:
+        raise  # fail the task; do not sell a cut-off or silently swap to extractive
     except Exception as exc:  # noqa: BLE001 — any LLM failure falls back to extractive
         status, short = _failure_detail(exc)
         log.warning(
